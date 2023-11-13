@@ -1,0 +1,23 @@
+# python staff
+__pycache__
+*.py[cdo]
+.env/
+env/
+venv/
+.venv/
+
+# general garbage
+_kakas/
+*.log
+*.bak
+*.pth
+
+# data
+data/
+models/
+
+# IDE
+.vscode
+.settings
+.idea
+
