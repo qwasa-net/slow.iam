@@ -1,6 +1,6 @@
 BASE_DIR ?= $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 VENV ?= $(BASE_DIR)/.venv
-PYTHON_SYSTEM ?= /usr/bin/python3
+PYTHON_SYSTEM ?= $(shell which python3)
 PYTHON ?= "${VENV}/bin/python"
 PIP ?= "${VENV}/bin/pip"
 
