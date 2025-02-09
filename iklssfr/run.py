@@ -239,25 +239,25 @@ def read_args():
     parser.add_argument(
         "--data-normalize",
         "-dn",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
         "--data-equalize",
         "-dq",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
         "--data-blur",
         "-db",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
         "--data-autocontrast",
         "-da",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
@@ -286,18 +286,18 @@ def read_args():
     parser.add_argument(
         "--show",
         "-s",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
         "--show-original",
         "-so",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
     )
     parser.add_argument(
         "--show-original-squeeze",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,  # 8)
     )
     parser.add_argument(

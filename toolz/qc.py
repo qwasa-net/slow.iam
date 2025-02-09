@@ -1,5 +1,4 @@
-"""
-"""
+""" """
 
 import tkinter as tk
 from PIL import Image, ImageTk
@@ -161,7 +160,7 @@ def main():
     images = get_images(args)
     root = tk.Tk()
     root.geometry(f"{args.win_width}x{args.win_height}")
-    qc = QC(root, images, args)
+    qc = QC(root, images, args)  # noqa
     root.bind("<Escape>", lambda e: root.quit())
     root.mainloop()
 

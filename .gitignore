@@ -15,6 +15,7 @@ _kakas/
 # data
 data/
 models/
+_torch/
 
 # IDE
 .vscode

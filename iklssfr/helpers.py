@@ -10,7 +10,7 @@ def str_eclipse(s, limit=80, r=0.75):
     if not s or len(s) <= limit:
         return s
     p = int(limit * r)
-    return s[:p] + "…" + s[-(limit-p-1):]
+    return s[:p] + "…" + s[-(limit - p - 1) :]
 
 
 class DatasetTransform(Dataset):

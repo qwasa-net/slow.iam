@@ -370,9 +370,16 @@ def read_args():
         description="Train a model on a images dataset (single-label)",
     )
 
-    parser.add_argument("--model-path", type=str, default=f"k{ts}.pth")
-    parser.add_argument("--save-all", action="store_true", default=False)
-
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=f"k{ts}.pth",
+    )
+    parser.add_argument(
+        "--save-all",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument(
         "--model",
         "-m",
@@ -397,8 +404,11 @@ def read_args():
         action="store_true",
         default=False,
     )
-
-    parser.add_argument("--data", type=str, default="data/")
+    parser.add_argument(
+        "--data",
+        type=str,
+        default="data/",
+    )
     parser.add_argument(
         "--data-normalize",
         action="store_true",
@@ -420,20 +430,58 @@ def read_args():
         default="random",
         choices=["random", "center"],
     )
-    parser.add_argument("--data-reload", type=int, default=DATA_RELOAD)
-    parser.add_argument("--data-train-pc", type=int, default=DATA_TRAIN_PC)
+    parser.add_argument(
+        "--data-reload",
+        type=int,
+        default=DATA_RELOAD,
+    )
+    parser.add_argument(
+        "--data-train-pc",
+        type=int,
+        default=DATA_TRAIN_PC,
+    )
+    parser.add_argument(
+        "--size-crop",
+        type=int,
+        default=DATA_CROP,
+    )
+    parser.add_argument(
+        "--size-resize",
+        type=int,
+        default=DATA_RESIZE,
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+    )
+    parser.add_argument(
+        "--epochs-limit",
+        type=int,
+        default=EPOCHS_LIMIT,
+    )
 
-    parser.add_argument("--size-crop", type=int, default=DATA_CROP)
-    parser.add_argument("--size-resize", type=int, default=DATA_RESIZE)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=DEVICE,
+    )
 
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--epochs-limit", type=int, default=EPOCHS_LIMIT)
-
-    parser.add_argument("--device", type=str, default=DEVICE)
-
-    parser.add_argument("--log", type=str, default=f"k{ts}.log")
-    parser.add_argument("--log-level", type=str, default="INFO")
-    parser.add_argument("--workers", type=int, default=os.cpu_count() // 4)
+    parser.add_argument(
+        "--log",
+        type=str,
+        default=f"k{ts}.log",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=os.cpu_count() // 4,
+    )
 
     args = parser.parse_args()
 

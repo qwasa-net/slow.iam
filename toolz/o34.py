@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw
 import random
 import os
 import argparse
-from math import sqrt, sin, cos, pi
+from math import sin, cos, pi
 
 IMG_WIDTH = 960
 IMG_HEIGHT = 960

@@ -1,0 +1,11 @@
+[project]
+name = "slow.iam"
+version = "0.0.1"
+requires-python = ">= 3.13"
+
+[isort]
+profile = "black"
+
+[tool.black]
+line-length = 120
+target-version = ['py312']
