@@ -1,10 +1,11 @@
-from duckduckgo_search import DDGS
 import argparse
-import urllib.request
-import os
-from PIL import Image
 import io
+import os
 import time
+import urllib.request
+
+from duckduckgo_search import DDGS
+from PIL import Image
 
 
 def ddg_images_search(query, max_results=100):
