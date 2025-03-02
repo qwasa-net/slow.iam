@@ -2,11 +2,12 @@
 Demo data generator.
 """
 
-from PIL import Image, ImageDraw
-import random
-import os
 import argparse
-from math import sin, cos, pi
+import os
+import random
+from math import cos, pi, sin
+
+from PIL import Image, ImageDraw
 
 IMG_WIDTH = 960
 IMG_HEIGHT = 960
@@ -85,6 +86,23 @@ def draw_triangle(img, x=None, y=None, r=None, a=None, color=None):
     return img
 
 
+def draw_star(img, x=None, y=None, r=None, a=None, color=None):
+    color = color or rnd_color()
+    x = rnd(img.width) if x is None else x
+    y = rnd(img.height) if y is None else y
+    r = rnd(min(img.height, img.width) // 4) if r is None else r
+    a = rnd(2 * pi) if a is None else a
+    coords = []
+    for i in range(5):
+        angle = a + i * 2 * pi / 5
+        coords.append((x + r * cos(angle), y + r * sin(angle)))
+        angle += pi / 5
+        coords.append((x + r / 2 * cos(angle), y + r / 2 * sin(angle)))
+    draw = ImageDraw.Draw(img)
+    draw.polygon(coords, fill=color)
+    return img
+
+
 def create_img(w, h, color=None):
     color = color or rnd_color()
     img = Image.new("RGB", (w, h), color)
@@ -107,13 +125,15 @@ def draw(img, args):
         fc = args.figures_count * (fcr * random.random() + (1 - fcr))
     else:
         fc = args.figures_count
-    for i in range(int(fc)):
+    for _ in range(int(fc)):
         if not args.figures or "o" in args.figures:
             img = draw_oval(img)
         if not args.figures or "4" in args.figures:
             img = draw_rect(img)
         if not args.figures or "3" in args.figures:
             img = draw_triangle(img)
+        if not args.figures or "5" in args.figures:
+            img = draw_star(img)
     return img
 
 
@@ -121,7 +141,8 @@ def main():
     args = read_args()
     paths = []
     for i in range(args.count):
-        img = create_img(args.img_width, args.img_height, args.bgcolor)
+        bgcolor = rnd_color() if args.bgcolor == "random" else args.bgcolor
+        img = create_img(args.img_width, args.img_height, bgcolor)
         img = draw(img, args)
         path = save_image(img, i, args)
         paths.append(path)

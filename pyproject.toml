@@ -3,8 +3,11 @@ name = "slow.iam"
 version = "0.0.1"
 requires-python = ">= 3.13"
 
-[isort]
+[tool.isort]
 profile = "black"
+skip_gitignore = true
+line_length = 120
+multi_line_output = 3
 
 [tool.black]
 line-length = 120

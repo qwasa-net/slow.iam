@@ -25,11 +25,12 @@ help:
 
 ## env
 $(PYTHON):  ## create venv
-	[ -d $(VENV) ] || $(PYTHON_SYSTEM) -m venv $(VENV) --clear
+	[ -d $(VENV) ] || $(PYTHON_SYSTEM) -m venv "$(VENV)" --clear
 
 install: $(PYTHON)  ## install requirements
 	$(PIP) install --upgrade pip setuptools
 	$(PIP) install --requirement requirements.txt
+	-$(PIP) install --requirement requirements-extra.txt 2>&1 | head -n 5
 
 install-dev: install  ## install dev tools
 	$(PIP) install --requirement requirements-dev.txt
@@ -50,12 +51,15 @@ docker-container-run:  ## run docker container
 
 
 ## shell
-$(IPYTHON): install-dev
+$(IPYTHON):
+	test -f $(IPYTHON) || make install-dev
+
 
 shell: $(IPYTHON)  ## run ipython shell
 	$(IPYTHON) -c 'import re, math, json; import torch; print(f"{torch.version.__version__=}")' -i
 
 format:  ## format
+	$(PYTHON) -m isort $(SOURCE_DIRS)
 	$(PYTHON) -m black $(SOURCE_DIRS)
 
 lint:  ## lint
@@ -63,26 +67,26 @@ lint:  ## lint
 	$(PYTHON) -m flake8 --statistics $(SOURCE_DIRS)
 
 ## demo
-demo: DEMO_RUN_MODEL_OPTS ?= --show --limit 50
-demo: DEMO_TRAIN_MODEL_OPTS ?= --epochs-limit 19 --data-autocontrast --data-normalize
-demo: install demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model  ## run demo
+demo: DEMO_RUN_MODEL_OPTS ?= --show --limit 60 --summarize
+demo: DEMO_TRAIN_MODEL_OPTS ?= --model resnet18 --epochs-limit 19 --batch-size 8 --data-autocontrast --data-normalize
+demo: demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model  ## run demo
 
-demo-no-show: DEMO_RUN_MODEL_OPTS ?= --no-show --limit 100
+demo-no-show: DEMO_RUN_MODEL_OPTS ?= --no-show --limit 100 --summarize
 demo-no-show: demo  ## run demo without show
 
 demo-generate-train-set:
 	# [1] generate train dataset
-	[ -d $(DATA_DIR)/o34/train/ ] || for fg in o 3 4 o4 o3; do \
+	[ -d $(DATA_DIR)/o34/train/ ] || for fg in o 3 4 5 o/4 o/3; do \
 	$(PYTHON) toolz/o34.py \
 	--save-path "$(DATA_DIR)/o34/train/$${fg}" \
-	--count 98 \
-	--figures-count 25 \
+	--count 199 \
+	--figures-count 21 \
 	--figures "$${fg}"; \
 	done
 
 demo-generate-test-set:
 	# [2] generate test dataset
-	[ -d $(DATA_DIR)/o34/test/ ] || for fg in o 3 4 o4 o3; do \
+	[ -d $(DATA_DIR)/o34/test/ ] || for fg in o 3 4 5 o4 o3; do \
 	$(PYTHON) toolz/o34.py \
 	--save-path "$(DATA_DIR)/o34/test/$${fg}" \
 	--count 10 \
@@ -96,7 +100,6 @@ demo-train-model:
 	iklssfr/train.py \
 	$(DEMO_TRAIN_MODEL_OPTS) \
 	--data "$(DATA_DIR)/o34/train/" \
-	--model resnet18 \
 	--model-path "$(DATA_DIR)/o34/model.pth" \
 	--log "$(DATA_DIR)/o34/model.log"
 

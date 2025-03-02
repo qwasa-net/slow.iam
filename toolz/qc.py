@@ -1,12 +1,13 @@
 """ """
 
-import tkinter as tk
-from PIL import Image, ImageTk
 import argparse
-import random
 import os
+import random
 import re
 import shutil
+import tkinter as tk
+
+from PIL import Image, ImageTk
 
 IMG_SIZE = 1024
 
@@ -34,7 +35,7 @@ def get_images(args):
     img_paths = []
     path_filter = re.compile(args.data_filter) if args.data_filter else None
     if os.path.isdir(args.data):
-        for root, dirs, files in os.walk(args.data):
+        for root, _dirs, files in os.walk(args.data):
             for file in files:
                 img_path = os.path.join(root, file)
                 if path_filter and not path_filter.search(img_path, re.I):
@@ -63,6 +64,7 @@ class QC:
     txt = None
     textvariable = None
     state: int = 0
+    state_names = ["init", "wait A", "wait B", "wait SAVE", "end"]
     xy0 = (0, 0)
     xy1 = (0, 0)
 
@@ -81,20 +83,77 @@ class QC:
         self.textvariable.set("Hello")
         self.txt.pack(padx=10, pady=10)
         self.root.bind_all("<Button>", lambda x: self.click_handler(x))
+        self.root.bind("<Key>", self.key_handler)
+
+    def key_handler(self, event):
+        print(f"pressed {event.char}")
+        if self.image:
+            ih, iw = self.image.height, self.image.width
+        else:
+            ih, iw = 0, 0
+        if event.char == "q":
+            self.root.quit()
+        elif event.char == "s" and self.state == 3:
+            self.save_image()
+            self.reset_selection()
+            self.show_next_image()
+        elif event.char == "n":
+            self.show_next_image()
+        elif event.char == " ":
+            self.reset_selection()
+            self.state = 1
+        elif event.char == "c":
+            # select central rect
+            if iw > ih:
+                x0, y0 = (iw - ih) / 2, 0
+                x1, y1 = x0 + ih, ih
+            else:
+                x0, y0 = 0, (ih - iw) / 2
+                x1, y1 = iw, y0 + iw
+            self.xy0 = (x0, y0)
+            self.xy1 = (x1, y1)
+            self.crop_image()
+            self.state = 3
+        elif event.char == "x" or event.char == "l":
+            # select left rect
+            if iw > ih:
+                x0, y0 = 0, 0
+                x1, y1 = ih, ih
+            else:
+                x0, y0 = 0, 0
+                x1, y1 = iw, iw
+            self.xy0 = (x0, y0)
+            self.xy1 = (x1, y1)
+            self.crop_image()
+            self.state = 3
+        elif event.char == "v" or event.char == "r":
+            # select right rect
+            if iw > ih:
+                x0, y0 = iw - ih, 0
+                x1, y1 = iw, ih
+            else:
+                x0, y0 = 0, ih - iw
+                x1, y1 = iw, ih
+            self.xy0 = (x0, y0)
+            self.xy1 = (x1, y1)
+            self.crop_image()
+            self.state = 3
+
+        self.update_text()
 
     def click_handler(self, event):
         print(f"clicked at {event.x}, {event.y} {event.num}")
-        if event.num == 3:
+        if event.num == 3:  # right click
             self.reset_selection()
-            self.show_image()
+            self.show_next_image()
         elif event.num != 1:
             return
-        elif self.state == 0:
-            self.show_image()
-        elif self.state == 1:
+        elif self.state == 0:  # left click init
+            self.show_next_image()
+        elif self.state == 1:  # left click A
             self.xy0 = (event.x, event.y)
             self.state = 2
-        elif self.state == 2:
+        elif self.state == 2:  # left click B
             self.xy1 = (event.x, event.y)
             if self.xy1[0] < self.xy0[0] or self.xy1[1] < self.xy0[1]:
                 self.reset_selection()
@@ -102,21 +161,21 @@ class QC:
             else:
                 self.crop_image()
                 self.state = 3
-        elif self.state == 3:
+        elif self.state == 3:  # left click SAVE
             self.state = 0
             self.save_image()
             self.reset_selection()
 
-        if self.state == 4:
-            text = "[END]"
-        else:
-            iname = os.path.basename(self.ipath) if self.ipath else ""
-            text = (
-                f"state={self.state} "
-                f"{iname=} "
-                f"(x0,y0)={self.xy0} (x1,y1)={self.xy1} "
-                f"(w,h)={(self.xy1[0]-self.xy0[0], self.xy1[1]-self.xy0[1])}"
-            )
+        self.update_text()
+
+    def update_text(self):
+        iname = os.path.basename(self.ipath) if self.ipath else ""
+        text = (
+            f"state={self.state} {self.state_names[self.state]} "
+            f"{iname=} "
+            f"(x0,y0)={self.xy0} (x1,y1)={self.xy1} "
+            f"(w,h)={(self.xy1[0]-self.xy0[0], self.xy1[1]-self.xy0[1])}"
+        )
         self.textvariable.set(text)
 
     def reset_selection(self):
@@ -135,7 +194,7 @@ class QC:
         self.img.configure(image=photo)
         self.img.image = photo
 
-    def show_image(self):
+    def show_next_image(self):
         try:
             image, ipath = next(self.images)
         except StopIteration:
