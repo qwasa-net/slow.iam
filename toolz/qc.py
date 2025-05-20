@@ -31,7 +31,6 @@ def load_image(image_path):
 
 
 def get_images(args):
-
     img_paths = []
     path_filter = re.compile(args.data_filter) if args.data_filter else None
     if os.path.isdir(args.data):
@@ -57,7 +56,6 @@ def get_images(args):
 
 
 class QC:
-
     image = None
     root = None
     img = None
@@ -174,7 +172,7 @@ class QC:
             f"state={self.state} {self.state_names[self.state]} "
             f"{iname=} "
             f"(x0,y0)={self.xy0} (x1,y1)={self.xy1} "
-            f"(w,h)={(self.xy1[0]-self.xy0[0], self.xy1[1]-self.xy0[1])}"
+            f"(w,h)={(self.xy1[0] - self.xy0[0], self.xy1[1] - self.xy0[1])}"
         )
         self.textvariable.set(text)
 

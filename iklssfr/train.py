@@ -28,13 +28,14 @@ log = logging.getLogger()
 
 
 class Trainer:
+    SIGMOID_THRESHOLD = 0.55
+    OPTIMIZERS = {"sgd": optim.SGD, "adam": optim.Adam, "adamw": optim.AdamW}
+    CRITERIONS = {"bce": nn.BCEWithLogitsLoss, "ce": nn.CrossEntropyLoss}
 
-    SIGMOID_THRESHOLD = 0.5
-
-    def __init__(self, args, data, criterion=None, optimizer=None):
+    def __init__(self, args, data):
         self.args = args
         self.data = data
-        self.setup_model(criterion, optimizer)
+        self.setup_model()
 
     def __str__(self):
         return f"Model({self.model}, {self.model_weights}, {self.model_source}, {self.model_keep_classes})"
@@ -48,12 +49,13 @@ class Trainer:
         if not self.args.model_keep_classes:
             self.adjust_model_classifier_layer()
 
-        self.criterion = criterion or nn.BCEWithLogitsLoss(reduction="mean")
+        self.model.to(self.args.device)
+
+        self.criterion = self.CRITERIONS[self.args.criterion](reduction="mean")
 
         params = [p for p in self.model.parameters() if p.requires_grad]
-        # self.optimizer = optimizer or optim.SGD(params, lr=0.001, momentum=0.9)
-        self.optimizer = optimizer or optim.AdamW(params, lr=0.001, weight_decay=0.01)
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=8, gamma=0.25)
+        self.optimizer = self.OPTIMIZERS[self.args.optimizer](params, lr=self.args.learning_rate)
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=7, gamma=0.33, last_epoch=-1)
 
     def adjust_model_classifier_layer(self):
         """
@@ -96,7 +98,7 @@ class Trainer:
             # eval or not eval
             if self.data.ds_eval_len > 0:
                 eval_acc = self.eval_model()
-                epoch_acc = sum((x * y for x, y in zip((train_acc, eval_acc), ACC_WEIGHTS)))
+                epoch_acc = sum((x * y for x, y in zip((train_acc, eval_acc), ACC_WEIGHTS, strict=False)))
             else:
                 epoch_acc = train_acc
 
@@ -119,20 +121,26 @@ class Trainer:
 
         for i, (inputs, labels) in enumerate(self.data.dl_train, start=1):
             is_last = i == len(self.data.dl_train)
-            if i % 25 == 1 or is_last:
+            if i % 33 == 1 or is_last:
                 log.info(" · batch №%d, inputs: %s, labels: %s", i, sizxx(inputs), sizxx(labels))
+            inputs, labels = inputs.to(self.args.device), labels.float().to(self.args.device)
             with torch.set_grad_enabled(True):
                 outputs = self.model(inputs)
-                loss = self.criterion(outputs, labels.float())
+                loss = self.criterion(outputs, labels)
                 loss.backward()
                 if is_last or (step_every_n <= 1) or (i % step_every_n == 0):
                     log.info(" ·· stepping on accumulated loss: %.3f", loss.item())
                     self.optimizer.step()
                     self.optimizer.zero_grad()
-            outputs.sigmoid_()
-            preds = outputs > self.SIGMOID_THRESHOLD  # train on multi-hots
-            # preds = torch.argmax(outputs, 1)  # train on hottest
-            corrects += torch.eq(preds, labels.data).sum()
+            if isinstance(self.criterion, nn.BCEWithLogitsLoss):
+                outputs.sigmoid_()
+                preds = outputs > self.SIGMOID_THRESHOLD  # multi-label (multi-hot)
+                corrects += torch.eq(preds, labels.data).sum()
+            elif isinstance(self.criterion, nn.CrossEntropyLoss):
+                preds = torch.argmax(outputs, 1)  # single-label (hottest)
+                corrects += torch.eq(preds, torch.argmax(labels.data, 1)).sum()
+            else:
+                raise ValueError("Unsupported criterion type for prediction logic.")
         self.scheduler.step()
 
         train_epoch_acc = corrects / (self.data.ds_train_len * len(self.data.classes))
@@ -149,6 +157,7 @@ class Trainer:
         with torch.set_grad_enabled(False):
             self.model.eval()
             for inputs, labels in self.data.dl_eval:
+                inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, labels.float())
                 losses += loss.item()
@@ -166,7 +175,7 @@ class Trainer:
         assert self.args.model_source in ["file", "github"]
 
         if self.args.model_source == "file":
-            return torch.load(self.args.model_path, weights_only=False)
+            return torch.load(self.args.model, weights_only=False)
 
         if self.args.model_source == "github":
             return torch.hub.load(
@@ -183,7 +192,7 @@ class Trainer:
         Saves the model to a file.
         """
         model_path = self.args.model_path.format(
-            epoch=epoch,
+            epoch=(epoch + 1),
             last=(epoch == self.args.epochs_limit - 1),
             acc=acc,
         )
@@ -197,16 +206,15 @@ class Trainer:
 
 
 class Data:
-
     classes = []
     dataset = None
     dataset_len = 0
     dl_train = None
     dl_eval = None
 
-    def __init__(self, args):
+    def __init__(self, transforms, args):
         self.args = args
-        self.tr = Transforms(args)
+        self.tr = transforms
         if self.args.data_classes:
             self.classes = self.args.data_classes.copy()
 
@@ -299,7 +307,6 @@ class Data:
 
 
 class Transforms:
-
     train = []
     eval = []
 
@@ -318,8 +325,8 @@ class Transforms:
     def init_train(self):
         trans_train = [
             tvt2.ToImage(),
-            tvt2.RandomHorizontalFlip(p=0.25),
-            tvt2.RandomVerticalFlip(p=0.25),
+            tvt2.RandomHorizontalFlip(p=0.2),
+            tvt2.RandomVerticalFlip(p=0.2),
             RandomRotateChoice(angles=[0, 0, 0, 0, 90, 180]),
             tvt2.RandomChoice(
                 [
@@ -353,7 +360,6 @@ class Transforms:
         self.train = trans_train
 
     def init_eval(self):
-
         trans_eval = [
             tvt2.ToImage(),
             tvt2.RandomChoice(
@@ -365,10 +371,6 @@ class Transforms:
                 ],
                 p=[1, 1],
             ),
-            # tvt2.Resize(
-            #     # ignore aspect ratio
-            #     size=(self.args.size_resize, self.args.size_resize),
-            # ),
             tvt2.CenterCrop(size=self.args.size_crop),
             tvt2.ToDtype(torch.float32, scale=True),
         ]
@@ -400,7 +402,7 @@ def main():
 
     # train
     tm_start = time.time()
-    model = Trainer(args, Data(args))
+    model = Trainer(args, Data(Transforms(args), args))
     accuracy, path = model.train()
     tm_secs = int(time.time() - tm_start)
 
@@ -423,6 +425,11 @@ def read_args():
 
     parser.add_argument(
         "--model-path",
+        type=str,
+        default="",
+    )
+    parser.add_argument(
+        "--model-path-dir",
         type=str,
         default="",
     )
@@ -454,6 +461,23 @@ def read_args():
         "--model-keep-classes",
         action="store_true",
         default=False,
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.001,
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw",
+        choices=["adam", "adamw", "sgd"],
+    )
+    parser.add_argument(
+        "--criterion",
+        type=str,
+        default="bce",
+        choices=["bce", "ce"],
     )
     parser.add_argument(
         "--data",
@@ -520,13 +544,11 @@ def read_args():
         type=int,
         default=EPOCHS_LIMIT,
     )
-
     parser.add_argument(
         "--device",
         type=str,
         default=DEVICE,
     )
-
     parser.add_argument(
         "--log",
         type=str,
@@ -559,6 +581,10 @@ def read_args():
             args.model_path = f"k{ts}_{{epoch}}.pth"
         else:
             args.model_path = f"k{ts}.pth"
+
+    if args.model_path_dir:
+        args.model_path = os.path.join(args.model_path_dir, args.model_path)
+        args.log = os.path.join(args.model_path_dir, args.log)
 
     return args
 

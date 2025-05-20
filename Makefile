@@ -5,7 +5,7 @@ VENV ?= $(BASE_DIR)/.venv
 PYTHON_SYSTEM ?= $(shell which python3)
 PYTHON ?= "${VENV}/bin/python"
 IPYTHON ?= "${VENV}/bin/ipython"
-PIP ?= "${VENV}/bin/pip" --disable-pip-version-check --require-virtualenv --quiet --retries 1
+PIP ?= "${VENV}/bin/pip" --disable-pip-version-check --require-virtualenv --retries 1
 
 DOCKER ?= DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain docker
 DOCKER_IMAGE_NAME ?= slow-iam
@@ -22,6 +22,7 @@ help:
 	@egrep "(^|  )## " ${MAKEFILE} | sed 's/:.*##/ ##/' | sed 's/ ## / -- /'
 	@echo "> make demo"
 
+tea: install install-dev format lint demo  ## install and run demo
 
 ## env
 $(PYTHON):  ## create venv
@@ -29,8 +30,8 @@ $(PYTHON):  ## create venv
 
 install: $(PYTHON)  ## install requirements
 	$(PIP) install --upgrade pip setuptools
-	$(PIP) install --requirement requirements.txt
-	-$(PIP) install --requirement requirements-extra.txt 2>&1 | head -n 5
+	$(PIP) install --requirement requirements.txt --log ${VENV}/pip.log
+	-$(PIP) install --requirement requirements-extra.txt --log ${VENV}/pip.log 2>&1 | head -n 5
 
 install-dev: install  ## install dev tools
 	$(PIP) install --requirement requirements-dev.txt
@@ -60,15 +61,15 @@ shell: $(IPYTHON)  ## run ipython shell
 
 format:  ## format
 	$(PYTHON) -m isort $(SOURCE_DIRS)
-	$(PYTHON) -m black $(SOURCE_DIRS)
+	$(PYTHON) -m ruff format $(SOURCE_DIRS)
 
 lint:  ## lint
 	$(PYTHON) -m black --check $(SOURCE_DIRS)
-	$(PYTHON) -m flake8 --statistics $(SOURCE_DIRS)
+	$(PYTHON) -m ruff check $(SOURCE_DIRS)
 
 ## demo
 demo: DEMO_RUN_MODEL_OPTS ?= --show --limit 60 --summarize
-demo: DEMO_TRAIN_MODEL_OPTS ?= --model resnet18 --epochs-limit 19 --batch-size 8 --data-autocontrast --data-normalize
+demo: DEMO_TRAIN_MODEL_OPTS ?= --model resnet18 --epochs-limit 17 --batch-size 8 --data-autocontrast --data-normalize --workers 1
 demo: demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model  ## run demo
 
 demo-no-show: DEMO_RUN_MODEL_OPTS ?= --no-show --limit 100 --summarize

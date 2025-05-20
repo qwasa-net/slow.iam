@@ -44,7 +44,6 @@ def save_images(images, path):
 def main():
     args = read_args()
     for query in args.query:
-
         images = ddg_images_search(query, max_results=args.max_results)
         print(f"Found {len(images)} images for {query}")
 
@@ -54,7 +53,6 @@ def main():
 
 
 def read_args():
-
     parser = argparse.ArgumentParser(description="Search images on DuckDuckGo.")
     parser.add_argument("query", type=str, default="cat", nargs="+")
     parser.add_argument("--save-path", type=str, default="./images/")

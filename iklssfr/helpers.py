@@ -10,6 +10,9 @@ from torch.utils.data import Dataset
 from torchvision.transforms import functional as tvf
 from torchvision.transforms import v2 as tvt2
 
+MPV_EXE_PATH = "/usr/bin/mpv"
+FFMPEG_EXE_PATH = "/usr/bin/ffmpeg"
+
 
 class DatasetTransform(Dataset):
     """
@@ -71,8 +74,8 @@ class MultiLabelDataset(Dataset):
         path_parts = set(filter(lambda x: not str(x).startswith("_"), dirname.split(os.sep)))
         path_parts.intersection_update(self.classes)
         path_targets = [c in path_parts for c in self.class_to_idx]
-        # if sum(path_targets) > 2:
-        #     print(f"{path} -> {path_parts} → {''.join(map(lambda x: str(int(x)), path_targets))}")
+        if sum(path_targets) > 2:
+            logging.debug("path targets: %s→%s", path, {"".join(map(lambda x: str(int(x)), path_targets))})
         tt = torch.tensor(path_targets, dtype=torch.bool)
         self._cache[dirname] = tt
         return tt
@@ -165,8 +168,7 @@ class SuperMiniCrop(SuperCrop):
     def __init__(self, size_crop, size_resize):
         self.transformers = [
             tvt2.Resize((size_resize, size_resize)),
-            tvt2.Compose([tvt2.Resize((size_resize, size_resize)), self._rot180]),
-            tvt2.Compose([tvt2.Resize(int(size_resize * 1.1)), tvt2.CenterCrop(size_crop)]),
+            tvt2.Compose([tvt2.Resize(int(size_resize)), tvt2.CenterCrop(size_crop)]),
         ]
 
 
@@ -223,7 +225,7 @@ class AccumulatorIterator:
             return item
         except StopIteration:
             self.source_oef = True
-            raise StopIteration
+            raise StopIteration from None
 
 
 def str_eclipse(s, limit=80, r=0.75):
@@ -271,3 +273,38 @@ def setup_logging(args):
     logging.getLogger("PIL").setLevel(logging.WARNING)
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("torch").setLevel(logging.WARNING)
+
+
+def player_cmd_ffmpeg(vpath, tmpdir, sstep=59, limit=100):
+    tmpfile_out = os.path.join(tmpdir, "f%06d.jpg")
+    return [
+        FFMPEG_EXE_PATH,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        vpath,
+        "-vf",
+        f"fps=1/{sstep}",
+        tmpfile_out,
+    ]
+
+
+def player_cmd_mpv(vpath, tmpdir, sstep=59, limit=100):
+    return [
+        MPV_EXE_PATH,
+        "--really-quiet",
+        "--untimed",
+        "--no-correct-pts",
+        "--hr-seek=no",
+        "--hr-seek-framedrop=yes",
+        "--no-audio",
+        "--slang=",
+        "--vo=image",
+        "--vo-image-format=jpg",
+        "--vo-image-jpeg-quality=98",
+        f"--vo-image-outdir={tmpdir}",
+        f"--sstep={sstep}",
+        f"--frames={limit}",
+        vpath,
+    ]

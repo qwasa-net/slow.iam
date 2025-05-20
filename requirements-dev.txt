@@ -1,6 +1,5 @@
 black
 isort
-flake8
-flake8-bugbear
+ruff
 pep8-naming
 ipython

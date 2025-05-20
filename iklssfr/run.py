@@ -10,7 +10,7 @@ from argparse import Namespace
 from collections import Counter
 
 import torch
-from helpers import AccumulatorIterator, Keeper, SuperCrop, SuperMiniCrop, setup_logging, str_eclipse
+from helpers import AccumulatorIterator, Keeper, SuperCrop, SuperMiniCrop, player_cmd_mpv, setup_logging, str_eclipse
 from PIL import Image
 from torchvision.transforms import v2
 
@@ -22,13 +22,10 @@ PRED_MIN = 0.01
 PRED_DEV = 3.45
 
 VIDEO_STEP_SEC = 59
-VIDEO_CAPS_LIMIT = 99
+VIDEO_CAPS_LIMIT = 199
 
 VIDEO_EXTENSIONS = [".mp4", ".avi", ".mkv", ".webm", ".mov", ".flv", ".wmv", ".ts"]
 IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
-
-MPV_EXE_PATH = "/usr/bin/mpv"
-FFMPEG_EXE_PATH = "/usr/bin/ffmpeg"
 
 LOG_FORMAT = "%(message)s"  # "%(asctime)s %(levelname)s %(message)s"
 
@@ -48,7 +45,6 @@ def classify(model, dataloader, classes, args):
     # + each part to be classified independently
     # + all part predictions are combined into one
     for i, (img_group, label) in enumerate(dataloader):
-
         # tupalize single tensor
         if not isinstance(img_group, (tuple, list)):
             img_group = (img_group,)
@@ -57,6 +53,7 @@ def classify(model, dataloader, classes, args):
         outs = []
 
         for j, img in enumerate(img_group):
+            img = img.to(args.device)
             out = model(img)[0]
             outs.append(list(out))
             if len(img_group) > 1:
@@ -74,7 +71,6 @@ def classify(model, dataloader, classes, args):
 
 
 class ClassifierResultItem:
-
     def __init__(self, label, data, preds, classes, part=None):
         assert len(preds) == len(classes), "preds and classes must have the same length"
         assert isinstance(label, str), "label must be a string"
@@ -123,7 +119,7 @@ def sqeeze_outs(combined, args):
     combined = [[float(c) if c >= args.predict_min else 0.0 for c in cs] for cs in combined]
 
     # mean
-    combined_mean = [sum(cs) / len(combined) for cs in zip(*combined)]
+    combined_mean = [sum(cs) / len(combined) for cs in zip(*combined, strict=False)]
 
     # get detected
     det_count = [0] * len(combined[0])
@@ -138,7 +134,7 @@ def sqeeze_outs(combined, args):
     det_mean = [x / det_count[i] if det_count[i] > 0 else 0.0 for i, x in enumerate(det_mean)]
 
     # use max, dampened
-    max_dmpd = [max(cs) / len(combined) for cs in zip(*combined)]
+    max_dmpd = [max(cs) / len(combined) for cs in zip(*combined, strict=False)]
 
     # combine average detected confidence and the damped max (magic!)
     combined = [max(combined_mean[j], det_mean[j]) + max_dmpd[j] for j in range(len(combined[0]))]
@@ -165,6 +161,12 @@ def get_data_paths(args):
         if fext.lower() in VIDEO_EXTENSIONS:
             has_video = True
         paths.append(args.data)
+    elif args.data_is_videostream:
+        has_video = True
+        paths.append(args.data)
+    else:
+        log.error(f"Unsupported data type: {args.data}")
+        return [], False
     if args.limit:
         random.shuffle(paths)
         paths = paths[: args.limit]
@@ -176,13 +178,12 @@ def get_dataloader(img_paths, args):
     transforms = get_transforms(args)
     for ipath in img_paths:
         fname, fext = os.path.splitext(os.path.basename(ipath))
-        if fext.lower() in VIDEO_EXTENSIONS:
-            yield from get_video_data_ffmpeg(ipath, transforms, args)
-            # yield from get_video_data(ipath, transforms)
+        if fext.lower() in VIDEO_EXTENSIONS or args.data_is_videostream:
+            yield from get_video_data(ipath, transforms, args)
         elif fext.lower() in IMAGE_EXTENSIONS:
             yield from get_image_data(ipath, transforms)
         else:
-            log.error(f"Unsupported file type: {fname}.{fext}")
+            log.error(f"Unsupported file type: {fname}{fext}")
 
 
 def get_image_data(img_path, transforms):
@@ -191,7 +192,12 @@ def get_image_data(img_path, transforms):
         yield img, img_path
 
 
-def get_video_data(vpath, transforms):
+def get_video_data(vpath, transforms, args):
+    yield from get_video_data_from_player(vpath, transforms, player_cmd_mpv, args)
+    # yield from get_video_data_cv2(ipath, transforms)
+
+
+def get_video_data_cv2(vpath, transforms):
     """
     why is this so slow?
     """
@@ -227,46 +233,15 @@ def get_video_data(vpath, transforms):
         cap.release()
 
 
-def get_video_data_ffmpeg(vpath, transforms, args):
-
-    def ffmpeg_cmd(vpath, tmpdir):
-        tmpfile_out = os.path.join(tmpdir, "f%06d.jpg")
-        return [
-            FFMPEG_EXE_PATH,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            vpath,
-            "-vf",
-            f"fps=1/{args.data_video_step}",
-            tmpfile_out,
-        ]
-
-    def mpv_cmd(vpath, tmpdir, sstep=None):
-        return [
-            MPV_EXE_PATH,
-            "--really-quiet",
-            "--untimed",
-            "--no-correct-pts",
-            "--hr-seek=no",
-            "--hr-seek-framedrop=yes",
-            "--no-audio",
-            "--slang=",
-            "--vo=image",
-            "--vo-image-format=jpg",
-            "--vo-image-jpeg-quality=98",
-            f"--vo-image-outdir={tmpdir}",
-            f"--sstep={sstep or args.data_video_step}",
-            f"--frames={args.data_video_limit}",
-            vpath,
-        ]
-
+def get_video_data_from_player(vpath, transforms, player_cmd, args):
     # make temp dir
     with tempfile.TemporaryDirectory(suffix="-iklssfr", ignore_cleanup_errors=True) as tmpdir:
         os.chmod(tmpdir, 0o700)
 
-        file_size = os.path.getsize(vpath)
+        try:
+            file_size = os.path.getsize(vpath)
+        except Exception:
+            file_size = 16 * 1024 * 1024
         if file_size < 0.25 * 1024 * 1024:
             return  # skip small files
         if file_size < 500 * 1024 * 1024:
@@ -274,13 +249,13 @@ def get_video_data_ffmpeg(vpath, transforms, args):
         else:
             sstep = args.data_video_step
 
-        cmd = mpv_cmd(vpath, tmpdir, sstep)  # ffmpeg_cmd(vpath, tmpdir)
+        cmd = player_cmd(vpath, tmpdir, sstep=sstep, limit=args.data_video_limit)
 
         try:
             log.info("calling caps maker: %s", cmd)
             subprocess.run(cmd, check=True)
         except Exception as e:
-            log.error(f"ffmpeg error {str_eclipse(vpath)}: {e}")
+            log.error(f"video player error {str_eclipse(vpath)}: {e}")
             return
 
         paths = []
@@ -350,7 +325,6 @@ def get_transforms(args):
 
 
 def main():
-
     args = read_args()
     setup_logging(args)
 
@@ -359,6 +333,7 @@ def main():
         log.info(f"{k}={v}")
 
     args, model, classes = load_model(args)
+    model.to(args.device)
 
     data_paths, has_video = get_data_paths(args)
     log.info(f"found data: {len(data_paths)=}, {has_video=}")
@@ -402,12 +377,20 @@ def read_args():
         default="data/",
     )
     parser.add_argument(
+        "--data-is-videostream",
+        "-dv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
         "--data-video-step",
+        "-dvs",
         type=int,
         default=VIDEO_STEP_SEC,
     )
     parser.add_argument(
         "--data-video-limit",
+        "-dvl",
         type=int,
         default=VIDEO_CAPS_LIMIT,
     )
@@ -500,6 +483,11 @@ def read_args():
         default=False,
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default=DEVICE,
+    )
+    parser.add_argument(
         "--log",
         type=str,
         default=None,
@@ -547,7 +535,7 @@ def summarize(result, args):
 
 
 def load_model(args):
-    model = torch.load(args.model_path, weights_only=False)
+    model = torch.load(args.model_path, weights_only=False, map_location=args.device)
     classes = getattr(model, "_classes", [])
     classes_names = {i: n for i, n in enumerate(classes)}
     model_args = vars(getattr(model, "_args", Namespace()))
@@ -599,9 +587,9 @@ def show(result, args, pagesize=100, rows=None, cols=None):
         rows = min(4, pagesize)
         cnt = 6
     elif args.data_crop in ("sm", "supermicro") and args.show_parts:
-        cols = 8
-        rows = min(4, pagesize)
-        cnt = 4
+        cols = 9
+        rows = min(3, pagesize)
+        cnt = 3
     elif args.data_crop == "5" and args.show_parts:
         cols = 6
         rows = min(4, pagesize)
@@ -619,7 +607,7 @@ def show(result, args, pagesize=100, rows=None, cols=None):
         rows, cols = 6, 10
 
     images_on_page = 0
-    for i, rz in enumerate(result):
+    for i, rz in enumerate(result, start=1):
         images_on_page += 1
         if images_on_page > rows * cols:
             plt.tight_layout()
@@ -628,7 +616,7 @@ def show(result, args, pagesize=100, rows=None, cols=None):
             images_on_page = 1
         ax = plt.subplot(rows, cols, images_on_page)
         ax.axis("off")
-        ax.set_title(f"№{i//cnt}: {rz.confident_predictions()}")
+        ax.set_title(f"№{i // cnt}: {rz.confident_predictions()}")
         if args.show_original and rz.is_part is None:
             img = orig_keeper.pop(rz.label)
             if args.show_original_squeeze:

@@ -12,3 +12,15 @@ multi_line_output = 3
 [tool.black]
 line-length = 120
 target-version = ['py312']
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
