@@ -33,7 +33,7 @@ def save_images(images, path):
                 if img.width < 500 or img.height < 500:
                     print(f"Skip too small {fname} {img.width}x{img.height}")
                     continue
-                open(ipath, "wb").write(data)
+                open(ipath, "wb").write(data)  # noqa
             i += 1
             print(f"+{ipath}")
         except Exception as x:

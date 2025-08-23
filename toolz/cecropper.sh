@@ -6,7 +6,7 @@ if [ "$#" -lt 2 ]; then
     exit 1
 fi
 
-BASEDIR=$1
+BASEDIR=`echo "$1" | sed 's#^file://##i'`
 CMD=$2
 FORCE=$3
 
