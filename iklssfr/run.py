@@ -3,16 +3,19 @@ import json
 import logging
 import math
 import os
-import random
-import subprocess
-import tempfile
-from argparse import Namespace
+import sys
+import urllib.parse
 from collections import Counter
+from itertools import batched
 
 import torch
-from helpers import AccumulatorIterator, Keeper, SuperCrop, SuperMiniCrop, player_cmd_mpv, setup_logging, str_eclipse
-from PIL import Image
 from torchvision.transforms import v2
+
+import ihelp.media
+from ihelp.config import Configuration
+from ihelp.helpers import AccumulatorIterator, Keeper, log_tz, setup_logging, str_eclipse
+
+from .transforms import AnyTransform, SuperCrop, SuperMiniCrop
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 IMG_MEAN = [0.485, 0.456, 0.406]
@@ -20,12 +23,6 @@ IMG_STD = [0.229, 0.224, 0.225]
 
 PRED_MIN = 0.01
 PRED_DEV = 3.45
-
-VIDEO_STEP_SEC = 59
-VIDEO_CAPS_LIMIT = 199
-
-VIDEO_EXTENSIONS = [".mp4", ".avi", ".mkv", ".webm", ".mov", ".flv", ".wmv", ".ts"]
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
 
 LOG_FORMAT = "%(message)s"  # "%(asctime)s %(levelname)s %(message)s"
 
@@ -44,7 +41,7 @@ def classify(model, dataloader, classes, args):
     # + every source image could be split into parts (crops, rotations)
     # + each part to be classified independently
     # + all part predictions are combined into one
-    for i, (img_group, label) in enumerate(dataloader):
+    for i, (img_group, label) in enumerate(dataloader, start=1):
         # tupalize single tensor
         if not isinstance(img_group, (tuple, list)):
             img_group = (img_group,)
@@ -52,18 +49,19 @@ def classify(model, dataloader, classes, args):
         # keep here every part prediction
         outs = []
 
-        for j, img in enumerate(img_group):
+        for j, img in enumerate(img_group, start=1):
             img = img.to(args.device)
             out = model(img)[0]
             outs.append(list(out))
+            log_tz(f"#{i}+{j}: ", img=img, out=out)
             if len(img_group) > 1:
-                rz = ClassifierResultItem(label, img, out, classes, part=j)
+                rz = ClassifierResultItem(label, img, out, classes, part=j, no=i)
                 log.debug(f"#{i}+{j}: {rz}")
                 if args.show_parts:
                     yield rz
 
         # combine all part predictions into one
-        rz = ClassifierResultItem(label, img, sqeeze_outs(outs, args), classes)
+        rz = ClassifierResultItem(label, img, sqeeze_outs(outs, args), classes, no=i)
         log.info(f"#{i}: {rz}")
 
         # send current result to the caller
@@ -71,7 +69,7 @@ def classify(model, dataloader, classes, args):
 
 
 class ClassifierResultItem:
-    def __init__(self, label, data, preds, classes, part=None):
+    def __init__(self, label, data, preds, classes, part=None, no=0):
         assert len(preds) == len(classes), "preds and classes must have the same length"
         assert isinstance(label, str), "label must be a string"
         assert isinstance(preds, (list, torch.Tensor)), "preds must be a list"
@@ -81,6 +79,7 @@ class ClassifierResultItem:
         self.preds = list(preds) if isinstance(preds, torch.Tensor) else preds
         self.classes = classes
         self.is_part = part
+        self.no = no
 
         preds_sorted = sorted(enumerate(self.preds), key=lambda x: -x[1])
         self.pred_ids = {x[0]: float(x[1]) for x in preds_sorted}
@@ -143,223 +142,99 @@ def sqeeze_outs(combined, args):
     return combined
 
 
-def get_data_paths(args):
-    paths = []
-    has_video = False
-    if os.path.isdir(args.data):
-        for root, _dirs, filenames in os.walk(args.data):
-            for filename in filenames:
-                _, fext = os.path.splitext(filename)
-                if fext.lower() not in VIDEO_EXTENSIONS + IMAGE_EXTENSIONS:
-                    continue
-                if fext.lower() in VIDEO_EXTENSIONS:
-                    has_video = True
-                path = os.path.join(root, filename)
-                paths.append(path)
-    elif os.path.isfile(args.data):
-        _, fext = os.path.splitext(args.data)
-        if fext.lower() in VIDEO_EXTENSIONS:
-            has_video = True
-        paths.append(args.data)
-    elif args.data_is_videostream:
-        has_video = True
-        paths.append(args.data)
-    else:
-        log.error(f"Unsupported data type: {args.data}")
-        return [], False
-    if args.limit:
-        random.shuffle(paths)
-        paths = paths[: args.limit]
-    paths.sort()
-    return paths, has_video
-
-
-def get_dataloader(img_paths, args):
-    transforms = get_transforms(args)
-    for ipath in img_paths:
-        fname, fext = os.path.splitext(os.path.basename(ipath))
-        if fext.lower() in VIDEO_EXTENSIONS or args.data_is_videostream:
-            yield from get_video_data(ipath, transforms, args)
-        elif fext.lower() in IMAGE_EXTENSIONS:
-            yield from get_image_data(ipath, transforms)
-        else:
-            log.error(f"Unsupported file type: {fname}{fext}")
-
-
-def get_image_data(img_path, transforms):
-    img = load_image(img_path, transforms)
-    if img is not None:
-        yield img, img_path
-
-
-def get_video_data(vpath, transforms, args):
-    yield from get_video_data_from_player(vpath, transforms, player_cmd_mpv, args)
-    # yield from get_video_data_cv2(ipath, transforms)
-
-
-def get_video_data_cv2(vpath, transforms):
-    """
-    why is this so slow?
-    """
-    import cv2  # noqa
-
-    try:
-        cap = cv2.VideoCapture(vpath)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 100)
-        fstep = int(fps * VIDEO_STEP_SEC)
-        fcount = 0
-        capped = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            fcount += 1
-            if fcount % fstep != 1:
-                continue
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
+def get_dataloader(config):
+    transforms = get_transforms(config)
+    for src in config.src:
+        loader = ihelp.media.load_data(src, config)
+        for mi in loader:
+            img = mi.image
+            orig_keeper.put(mi.path, img)
             if transforms:
                 img = transforms(img)
             if isinstance(img, torch.Tensor):
                 img.unsqueeze_(0)
-            yield img, vpath
-            capped += 1
-            if capped >= VIDEO_CAPS_LIMIT:
-                break
-    except Exception as e:
-        log.error(f"video reading error {str_eclipse(vpath)}: {e}")
-    finally:
-        cap.release()
+            yield img, mi.path
 
 
-def get_video_data_from_player(vpath, transforms, player_cmd, args):
-    # make temp dir
-    with tempfile.TemporaryDirectory(suffix="-iklssfr", ignore_cleanup_errors=True) as tmpdir:
-        os.chmod(tmpdir, 0o700)
-
-        try:
-            file_size = os.path.getsize(vpath)
-        except Exception:
-            file_size = 16 * 1024 * 1024
-        if file_size < 0.25 * 1024 * 1024:
-            return  # skip small files
-        if file_size < 500 * 1024 * 1024:
-            sstep = args.data_video_step // 3
-        else:
-            sstep = args.data_video_step
-
-        cmd = player_cmd(vpath, tmpdir, sstep=sstep, limit=args.data_video_limit)
-
-        try:
-            log.info("calling caps maker: %s", cmd)
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            log.error(f"video player error {str_eclipse(vpath)}: {e}")
-            return
-
-        paths = []
-        for root, _dirs, filenames in os.walk(tmpdir):
-            for filename in filenames:
-                path = os.path.join(root, filename)
-                paths.append(path)
-        paths.sort()
-
-        prev_file_size = None
-        for path in paths:
-            file_size = os.path.getsize(path)
-            if file_size == prev_file_size:
-                continue  # skip duplicates, detected by size (¿bug?)
-            prev_file_size = file_size
-            yield from get_image_data(path, transforms)
-
-
-def load_image(image_path, transforms=None):
-    try:
-        img = Image.open(image_path)
-        orig_keeper.put(image_path, img)
-        if transforms:
-            img = transforms(img)
-        if isinstance(img, torch.Tensor):
-            img.unsqueeze_(0)
-    except Exception as e:
-        log.error(f"Error loading image {image_path}: {e}")
-        img = None
-    return img
-
-
-def get_transforms(args):
+def get_transforms(config):
     transforms = [
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=True),
     ]
-    if args.data_normalize:
-        transforms.append(v2.Normalize(IMG_MEAN, IMG_STD))
-    if args.data_autocontrast:
+    if config.data_autocontrast:
         transforms.append(v2.functional.autocontrast)
-    if args.data_equalize:
+    if config.data_equalize:
         transforms.append(v2.functional.equalize)
-    if args.data_blur:
+    if config.data_blur:
         transforms.append(v2.GaussianBlur(kernel_size=(3, 7), sigma=0.5))
-    if args.data_crop in ("5", "5+"):
-        transforms.append(v2.Resize(size=int(args.size_resize * 1.33)))
-        transforms.append(v2.FiveCrop(size=args.size_crop))
+    if config.data_crop in ("5", "5+"):
+        transforms.append(v2.Resize(size=int(config.size_resize * 1.33)))
+        transforms.append(v2.FiveCrop(size=config.size_crop))
         transforms.append(v2.Lambda(lambda c: c.unsqueeze(0)))
-    elif args.data_crop in ("10", "10+"):
-        transforms.append(v2.Resize(size=int(args.size_resize * 1.33)))
-        transforms.append(v2.TenCrop(size=args.size_crop))
+    elif config.data_crop in ("10", "10+"):
+        transforms.append(v2.Resize(size=int(config.size_resize * 1.33)))
+        transforms.append(v2.TenCrop(size=config.size_crop))
         transforms.append(v2.Lambda(lambda c: c.unsqueeze(0)))
-    elif args.data_crop in ("s", "super"):
-        transforms.append(SuperCrop(args.size_crop, args.size_resize))
+    elif config.data_crop in ("s", "super"):
+        transforms.append(SuperCrop(config.size_crop, config.size_resize))
         transforms.append(v2.Lambda(lambda c: c.unsqueeze(0)))
-    elif args.data_crop in ("sm", "supermini"):
-        transforms.append(SuperMiniCrop(args.size_crop, args.size_resize))
+    elif config.data_crop in ("sm", "supermini"):
+        transforms.append(SuperMiniCrop(config.size_crop, config.size_resize))
         transforms.append(v2.Lambda(lambda c: c.unsqueeze(0)))
-    elif args.data_crop in ("c", "center"):
-        transforms.append(v2.Resize(size=args.size_resize))
-        transforms.append(v2.CenterCrop(size=args.size_crop))
+    elif config.data_crop in ("c", "center"):
+        transforms.append(v2.Resize(size=config.size_resize))
+        transforms.append(v2.CenterCrop(size=config.size_crop))
     else:
-        transforms.append(v2.Resize(size=(args.size_resize, args.size_resize)))
-        transforms.append(v2.CenterCrop(size=args.size_crop))
+        transforms.append(v2.Resize(size=(config.size_resize, config.size_resize)))
+        transforms.append(v2.CenterCrop(size=config.size_crop))
+    if config.data_normalize:
+        transforms.append(AnyTransform(v2.Normalize(IMG_MEAN, IMG_STD)))
     return v2.Compose(transforms)
 
 
 def main():
-    args = read_args()
-    setup_logging(args)
+    config = read_args()
+    setup_logging(config)
 
-    log.info("args:")
-    for k, v in vars(args).items():
+    log.info("config:")
+    for k, v in config.items():
         log.info(f"{k}={v}")
 
-    args, model, classes = load_model(args)
-    model.to(args.device)
+    config, model, classes = load_model(config)
+    model.to(config.device)
 
-    data_paths, has_video = get_data_paths(args)
-    log.info(f"found data: {len(data_paths)=}, {has_video=}")
-    dataloader = get_dataloader(data_paths, args)
+    orig_keeper.keep = config.show_original
 
-    orig_keeper.keep = args.show_original
-
-    class_results = classify(model, dataloader, classes, args)
+    dataloader = get_dataloader(config)
+    class_results = classify(model, dataloader, classes, config)
     result = AccumulatorIterator(class_results)
 
-    if args.show:
+    has_video = config.data_is_videostream or any(
+        [str_eclipse(p).lower().endswith(tuple(ihelp.media.VIDEO_EXTENSIONS)) for p in config.src]
+    )
+
+    if config.show:
         show(
             result,
-            args=args,
-            pagesize=len(data_paths) if not has_video else 25 * len(data_paths),
+            config=config,
+            pagesize=36 if has_video else 64,
         )
 
-    if args.summarize:
-        summarize(result, args)
+    if config.summarize:
+        summarize(result, config)
 
-    if args.save:
-        save(result, args)
+    if config.save:
+        save(result, config)
 
 
 def read_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "src",
+        type=str,
+        nargs="+",
+        default="data/",
+    )
     parser.add_argument(
         "--model-path",
         "-m",
@@ -371,12 +246,6 @@ def read_args():
         type=str,
     )
     parser.add_argument(
-        "--data",
-        "-d",
-        type=str,
-        default="data/",
-    )
-    parser.add_argument(
         "--data-is-videostream",
         "-dv",
         action=argparse.BooleanOptionalAction,
@@ -386,13 +255,13 @@ def read_args():
         "--data-video-step",
         "-dvs",
         type=int,
-        default=VIDEO_STEP_SEC,
+        default=ihelp.media.VIDEO_STEP_SEC,
     )
     parser.add_argument(
         "--data-video-limit",
         "-dvl",
         type=int,
-        default=VIDEO_CAPS_LIMIT,
+        default=ihelp.media.VIDEO_CAPS_LIMIT,
     )
     parser.add_argument(
         "--data-normalize",
@@ -495,7 +364,12 @@ def read_args():
     parser.add_argument(
         "--log-level",
         type=str,
-        default="DEBUG",
+        default="INFO",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
     )
 
     args = parser.parse_args()
@@ -506,10 +380,15 @@ def read_args():
     if args.size_resize and (args.size_crop > args.size_resize or args.size_crop == 0):
         args.size_crop = args.size_resize
 
-    if args.data and args.data.startswith("file://"):
-        args.data = args.data[7:]
+    args.src = [urllib.parse.unquote(s[7:]) if s.startswith("file://") else s for s in args.src]
+    args.src = [os.path.abspath(s) for s in args.src]
 
-    return args
+    if args.debug:
+        args.log_level = "DEBUG"
+
+    config = Configuration(none_missing=True)
+    config.configure(params=vars(args))
+    return config
 
 
 def summarize(result, args):
@@ -534,12 +413,14 @@ def summarize(result, args):
     return rz
 
 
-def load_model(args):
-    model = torch.load(args.model_path, weights_only=False, map_location=args.device)
+def load_model(config):
+    model = torch.load(config.model_path, weights_only=False, map_location=config.device)
     classes = getattr(model, "_classes", [])
     classes_names = {i: n for i, n in enumerate(classes)}
-    model_args = vars(getattr(model, "_args", Namespace()))
-    log.info(f"model: {args.model_path}")
+    model_args = getattr(model, "_args", dict())
+    if isinstance(model_args, argparse.Namespace):
+        model_args = vars(model_args)
+    log.info(f"model: {config.model_path}")
     log.info(f"model.classes: {classes}")
     log.info(f"model.args: {model_args}")
 
@@ -551,11 +432,11 @@ def load_model(args):
         "data_autocontrast",
         "data_blur",
     ]:
-        if not getattr(args, p) and p in model_args:
-            setattr(args, p, model_args[p])
+        if not config.get(p) and p in model_args:
+            config[p] = model_args[p]
             log.info(f"{p} → {model_args[p]}")
 
-    return args, model, classes_names
+    return config, model, classes_names
 
 
 def save(result, args):
@@ -571,68 +452,117 @@ def save(result, args):
         json.dump(data, outfile, indent=2, ensure_ascii=False)
 
 
-def show(result, args, pagesize=100, rows=None, cols=None):
-    """
-    Show images with predictions.
-    """
-    import matplotlib as mpl
-    import matplotlib.pyplot as plt
-
-    cnt = 1
-    mpl.rcParams["toolbar"] = "None"
+def show(result, config, pagesize=100, rows=None, cols=None):
     if rows is not None and cols is not None:
         pass
-    elif args.data_crop in ("s", "super") and args.show_parts:
+    elif config.data_crop in ("s", "super") and config.show_parts:
         cols = 6
-        rows = min(4, pagesize)
-        cnt = 6
-    elif args.data_crop in ("sm", "supermicro") and args.show_parts:
-        cols = 9
         rows = min(3, pagesize)
-        cnt = 3
-    elif args.data_crop == "5" and args.show_parts:
-        cols = 6
+    elif config.data_crop in ("sm", "supermicro") and config.show_parts:
+        cols = 9
         rows = min(4, pagesize)
-        cnt = 6
-    elif args.data_crop == "10" and args.show_parts:
+    elif config.data_crop == "5" and config.show_parts:
+        cols = 6
+        rows = min(3, pagesize)
+    elif config.data_crop == "10" and config.show_parts:
         cols = 11
-        rows = min(5, pagesize)
-        cnt = 11
+        rows = min(6, pagesize)
     elif pagesize < 6:
         rows, cols = 1, pagesize
     elif pagesize <= 50:
         cols = min(9, int(math.sqrt(pagesize) * 1.25 + 1))
         rows = pagesize // cols + 1
     else:
-        rows, cols = 6, 10
+        rows, cols = 7, 9
 
-    images_on_page = 0
-    for i, rz in enumerate(result, start=1):
-        images_on_page += 1
-        if images_on_page > rows * cols:
-            plt.tight_layout()
-            plt.show()
-            plt.close()
-            images_on_page = 1
-        ax = plt.subplot(rows, cols, images_on_page)
-        ax.axis("off")
-        ax.set_title(f"№{i // cnt}: {rz.confident_predictions()}")
+    pagesize = rows * cols
+    for page in batched(result, pagesize, strict=False):
+        if len(page) <= 6:
+            cols, rows = len(page), 1
+        elif len(page) < pagesize and not config.show_parts:
+            cols = min(9, int(math.sqrt(len(page)) * 1.25 + 1))
+            rows = len(page) // cols + 1
+        show_page(cols, rows, page, config)
+
+
+def show_page(cols, rows, results, args):
+    """
+    Show images with predictions using tkinter.
+    """
+    import tkinter as tk
+    from tkinter import Frame, ttk
+
+    import numpy as np
+    from PIL import Image, ImageTk
+
+    root = tk.Tk()
+    root.attributes("-zoomed", True)
+    root.update()
+    sw = root.winfo_screenwidth() - 20
+    sh = root.winfo_screenheight() - 40
+
+    pady = int(min(40, sh // 30))
+    paddy = pady // 2
+    cw = int(sw / cols)
+    ch = int(sh / rows)
+    thw = cw - paddy
+    thh = int((ch + thw / 16 * 9) // 2 - paddy)
+
+    iframe = Frame(root)
+    iframe.pack(fill="both", expand=True)
+
+    for col in range(cols):
+        iframe.grid_columnconfigure(col, weight=1)
+    for row in range(rows):
+        iframe.grid_rowconfigure(row, weight=1)
+
+    log.debug(f"showing {len(results)} images, {cols=}x{rows=}, {thw=}x{thh=}, {sw=}x{sh=}")
+
+    for i, rz in enumerate(results):
+        row_idx, col_idx = divmod(i, cols)
+        if rz.is_part is None:
+            title = f"№{rz.no}: {rz.confident_predictions()}"
+        else:
+            title = f"№{rz.no}+{rz.is_part}: {rz.confident_predictions()}"
+
+        img = None
         if args.show_original and rz.is_part is None:
             img = orig_keeper.pop(rz.label)
-            if args.show_original_squeeze:
-                iw, ih = img.size
-                rz = max(0.66, min(1.1, ih / iw))
-                img = img.resize((args.size_crop, int(rz * args.size_crop)))
         else:
             if isinstance(rz.data, torch.Tensor):
-                img = rz.data[0].cpu().numpy().transpose(1, 2, 0)
-                img = img.clip(0, 1)
-            else:
+                img_np = rz.data[0].cpu().numpy().transpose(1, 2, 0)
+                img_np = (img_np.clip(0, 1) * 255).astype(np.uint8)
+                img = Image.fromarray(img_np)
+            elif isinstance(rz.data, Image.Image):
                 img = rz.data
-        ax.imshow(img)
-    if images_on_page:
-        plt.tight_layout()
-        plt.show()
+
+        if not img:
+            continue
+
+        cell = Frame(iframe, width=cw, height=ch)
+        cell.grid(row=row_idx, column=col_idx, padx=0, pady=0)
+
+        label_widget = ttk.Label(cell, text=title, wraplength=thw, font=("Arial", 10))
+        label_widget.pack(side="top", expand=True)
+
+        iw, ih = img.size
+        ir = iw / ih
+        if args.show_original_squeeze:
+            ir = max(0.92, min(1.78, ir))
+        img = img.resize((int(thh * ir), thh), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        img_widget = ttk.Label(cell, image=photo)
+        img_widget._image = photo
+        img_widget.pack(side="top", expand=True)
+
+    def on_key(event):
+        if event.keysym == "Escape":
+            sys.exit(0)
+        elif event.char and event.char.isascii():
+            root.destroy()
+
+    root.bind("<Key>", on_key)
+    root.mainloop()
 
 
 if __name__ == "__main__":

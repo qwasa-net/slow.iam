@@ -1,3 +1,6 @@
+.*
+_*/
+
 # python staff
 __pycache__
 *.py[cdo]

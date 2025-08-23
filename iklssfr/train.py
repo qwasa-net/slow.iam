@@ -1,24 +1,31 @@
 import argparse
+import configparser
 import logging
 import os
 import random
 import time
+import urllib.parse
 from datetime import datetime as dt
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torchvision
-from helpers import DatasetTransform, MultiLabelDataset, RandomRotateChoice, setup_logging, sizxx
 from torch.utils.data import DataLoader, Subset
-from torchvision.transforms import functional as tvf
-from torchvision.transforms import v2 as tvt2
+from torchvision.transforms import functional as trf
+from torchvision.transforms import v2 as trv2
+
+import ihelp.helpers as helpers
+from ihelp.config import Configuration
+from ihelp.helpers import log_tz, setup_logging, sizexx
+from ihelp.media import IMAGE_EXTENSIONS
+
+from .datasets import MultiLabelDataset
+from .transforms import RandomResizedCropSq, RandomRotateChoice
 
 EPOCHS_LIMIT = 19
 DATA_CROP = 224
 DATA_RESIZE = 242
 BATCH_SIZE = 12
-DATA_TRAIN_PC = 88
+DATA_TRAIN_PC = 91
 DATA_RELOAD = 7
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 GITHUB_REPO = "pytorch/vision"
@@ -29,11 +36,11 @@ log = logging.getLogger()
 
 class Trainer:
     SIGMOID_THRESHOLD = 0.55
-    OPTIMIZERS = {"sgd": optim.SGD, "adam": optim.Adam, "adamw": optim.AdamW}
-    CRITERIONS = {"bce": nn.BCEWithLogitsLoss, "ce": nn.CrossEntropyLoss}
+    OPTIMIZERS = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
+    CRITERIONS = {"bce": torch.nn.BCEWithLogitsLoss, "ce": torch.nn.CrossEntropyLoss}
 
-    def __init__(self, args, data):
-        self.args = args
+    def __init__(self, config, data):
+        self.config = config
         self.data = data
         self.setup_model()
 
@@ -46,16 +53,16 @@ class Trainer:
         """
 
         self.model = self.load_model()
-        if not self.args.model_keep_classes:
+        if not self.config.model_keep_classes:
             self.adjust_model_classifier_layer()
 
-        self.model.to(self.args.device)
+        self.model.to(self.config.device)
 
-        self.criterion = self.CRITERIONS[self.args.criterion](reduction="mean")
+        self.criterion = self.CRITERIONS[self.config.criterion](reduction="mean")
 
         params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = self.OPTIMIZERS[self.args.optimizer](params, lr=self.args.learning_rate)
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=7, gamma=0.33, last_epoch=-1)
+        self.optimizer = self.OPTIMIZERS[self.config.optimizer](params, lr=self.config.learning_rate)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=7, gamma=0.5, last_epoch=-1)
 
     def adjust_model_classifier_layer(self):
         """
@@ -66,12 +73,12 @@ class Trainer:
         num_classes = len(self.data.classes)
         if hasattr(self.model, "fc"):
             num_ftrs = self.model.fc.in_features
-            self.model.fc = nn.Linear(num_ftrs, num_classes)
+            self.model.fc = torch.nn.Linear(num_ftrs, num_classes)
             log.info("fc layer > %s classes", num_classes)
             return
-        if hasattr(self.model, "classifier") and isinstance(self.model.classifier, nn.Sequential):
+        if hasattr(self.model, "classifier") and isinstance(self.model.classifier, torch.nn.Sequential):
             num_ftrs = self.model.classifier[1].in_features
-            self.model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
+            self.model.classifier[-1] = torch.nn.Linear(num_ftrs, num_classes)
             log.info("classifier > %s classes", num_classes)
             return
 
@@ -83,8 +90,8 @@ class Trainer:
         best_acc, eval_acc = 0.0, 0.0
         best_path = None
 
-        for epoch in range(self.args.epochs_limit):
-            log.info("epoch №%d/%d", epoch + 1, self.args.epochs_limit)
+        for epoch in range(self.config.epochs_limit):
+            log.info("epoch №%d/%d", epoch + 1, self.config.epochs_limit)
 
             # reload data (if needed)
             self.data.load(epoch)
@@ -103,49 +110,42 @@ class Trainer:
                 epoch_acc = train_acc
 
             # save the model (best so far or all)
-            if epoch_acc > best_acc or self.args.save_all:
+            if epoch_acc > best_acc or self.config.save_all:
                 best_path = self.save_model(epoch, epoch_acc)
             best_acc = max(best_acc, epoch_acc)
 
         return best_acc, best_path
 
-    def train_model_one_epoch(self, step_every_n=None):
+    def train_model_one_epoch(self):
         """
         Trains a model for one epoch.
         """
 
         corrects = 0
-        step_every_n = self.args.batch_size if step_every_n is None else step_every_n
+        step_every_n = self.config.optimizer_step_every_n
         self.model.train()
         self.optimizer.zero_grad()
 
         for i, (inputs, labels) in enumerate(self.data.dl_train, start=1):
             is_last = i == len(self.data.dl_train)
             if i % 33 == 1 or is_last:
-                log.info(" · batch №%d, inputs: %s, labels: %s", i, sizxx(inputs), sizxx(labels))
-            inputs, labels = inputs.to(self.args.device), labels.float().to(self.args.device)
+                log.info(" · batch №%d, inputs: %s, labels: %s", i, sizexx(inputs), sizexx(labels))
+            inputs, labels = inputs.to(self.config.device), labels.float().to(self.config.device)
             with torch.set_grad_enabled(True):
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, labels)
                 loss.backward()
                 if is_last or (step_every_n <= 1) or (i % step_every_n == 0):
-                    log.info(" ·· stepping on accumulated loss: %.3f", loss.item())
+                    log.debug(" ·· stepping on accumulated loss: %.3f", loss.item())
                     self.optimizer.step()
                     self.optimizer.zero_grad()
-            if isinstance(self.criterion, nn.BCEWithLogitsLoss):
-                outputs.sigmoid_()
-                preds = outputs > self.SIGMOID_THRESHOLD  # multi-label (multi-hot)
-                corrects += torch.eq(preds, labels.data).sum()
-            elif isinstance(self.criterion, nn.CrossEntropyLoss):
-                preds = torch.argmax(outputs, 1)  # single-label (hottest)
-                corrects += torch.eq(preds, torch.argmax(labels.data, 1)).sum()
-            else:
-                raise ValueError("Unsupported criterion type for prediction logic.")
+                log_tz(" ·· ", inputs=inputs, outputs=outputs)
+            outputs.sigmoid_()
+            preds = outputs > self.SIGMOID_THRESHOLD  # multi-label (multi-hot)
+            corrects += torch.eq(preds, labels.data).sum()
         self.scheduler.step()
 
-        train_epoch_acc = corrects / (self.data.ds_train_len * len(self.data.classes))
-
-        return train_epoch_acc
+        return corrects / (self.data.ds_train_len * len(self.data.classes))
 
     def eval_model(self):
         """
@@ -157,7 +157,7 @@ class Trainer:
         with torch.set_grad_enabled(False):
             self.model.eval()
             for inputs, labels in self.data.dl_eval:
-                inputs, labels = inputs.to(self.args.device), labels.to(self.args.device)
+                inputs, labels = inputs.to(self.config.device), labels.float().to(self.config.device)
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, labels.float())
                 losses += loss.item()
@@ -172,32 +172,33 @@ class Trainer:
         return eval_acc
 
     def load_model(self):
-        assert self.args.model_source in ["file", "github"]
+        assert self.config.model_source in ["file", "github"]
 
-        if self.args.model_source == "file":
-            return torch.load(self.args.model, weights_only=False)
+        if self.config.model_source == "file":
+            return torch.load(self.config.model, weights_only=False)
 
-        if self.args.model_source == "github":
+        if self.config.model_source == "github":
             return torch.hub.load(
                 GITHUB_REPO,
                 source="github",
-                model=self.args.model,
-                weights=self.args.model_weights,
+                model=self.config.model,
+                weights=self.config.model_weights,
                 skip_validation=True,
                 trust_repo=True,
             )
+        return None
 
     def save_model(self, epoch, acc=None):
         """
         Saves the model to a file.
         """
-        model_path = self.args.model_path.format(
+        model_path = self.config.model_path.format(
             epoch=(epoch + 1),
-            last=(epoch == self.args.epochs_limit - 1),
+            last=(epoch == self.config.epochs_limit - 1),
             acc=acc,
         )
         self.model._classes = self.data.classes
-        self.model._args = self.args
+        self.model._args = self.config.as_dict()
         self.model._epoch = epoch
         self.model._ds_train_len = self.data.ds_train_len
         torch.save(self.model, model_path)
@@ -212,11 +213,11 @@ class Data:
     dl_train = None
     dl_eval = None
 
-    def __init__(self, transforms, args):
-        self.args = args
-        self.tr = transforms
-        if self.args.data_classes:
-            self.classes = self.args.data_classes.copy()
+    def __init__(self, transforms, config):
+        self.config = config
+        self.transforms = transforms
+        if self.config.data_classes:
+            self.classes = self.config.data_classes.copy()
 
     def load(self, epoch=None, reload=False):
         """ """
@@ -227,9 +228,9 @@ class Data:
         if (
             not reload
             and self.dl_train is not None
-            and self.args.data_reload > 0
+            and self.config.data_reload > 0
             and epoch is not None
-            and epoch % self.args.data_reload != 0
+            and epoch % self.config.data_reload != 0
         ):
             return
 
@@ -248,15 +249,16 @@ class Data:
         Loads a dataset from a directory.
         """
 
-        self.dataset = torchvision.datasets.ImageFolder(
-            root=self.args.data,
-            transform=tvt2.Compose(self.tr.train),
+        self.dataset = torchvision.datasets.DatasetFolder(
+            root=self.config.src,
             allow_empty=True,
+            loader=helpers.tenzor_loader,
+            extensions=IMAGE_EXTENSIONS,
         )
         if not self.classes:
             self.classes = self.dataset.classes.copy()
         self.dataset_len = len(self.dataset)
-        log.info("loaded dataset: %s, %d", self.args.data, self.dataset_len)
+        log.info("loaded dataset: %s, %d items", self.config.src, self.dataset_len)
 
     def split_dataset(self):
         """
@@ -265,28 +267,24 @@ class Data:
 
         idxs = list(range(self.dataset_len))
         random.shuffle(idxs)
-        idx_split = int(self.dataset_len * self.args.data_train_pc / 100)
+        idx_split = int(self.dataset_len * self.config.data_train_pc / 100)
 
         dataset_train = Subset(
             MultiLabelDataset(
-                dataset=DatasetTransform(
-                    dataset=self.dataset,
-                    transform=tvt2.Compose(self.tr.train),
-                ),
+                dataset=self.dataset,
+                transform=trv2.Compose(self.transforms.train) if self.transforms.train else None,
                 classes=self.classes,
-                drop_prefix=self.args.data,
+                drop_prefix=self.config.src,
             ),
             indices=idxs[:idx_split],
         )
 
         dataset_eval = Subset(
             MultiLabelDataset(
-                dataset=DatasetTransform(
-                    dataset=self.dataset,
-                    transform=tvt2.Compose(self.tr.eval),
-                ),
-                classes=self.args.data_classes,
-                drop_prefix=self.args.data,
+                dataset=self.dataset,
+                transform=trv2.Compose(self.transforms.eval) if self.transforms.eval else None,
+                classes=self.classes,
+                drop_prefix=self.config.data,
             ),
             indices=idxs[idx_split:],
         )
@@ -300,9 +298,10 @@ class Data:
 
         return DataLoader(
             dataset,
-            batch_size=self.args.batch_size,
+            batch_size=self.config.batch_size,
             shuffle=shuffle,
-            num_workers=self.args.workers,
+            num_workers=self.config.workers,
+            persistent_workers=True,
         )
 
 
@@ -319,72 +318,78 @@ class Transforms:
         """
 
         self.args = args
-        self.init_train()
-        self.init_eval()
+        if not self.args.data_ready:
+            self.train = self.trans_train()
+            self.eval = self.trans_eval()
+        else:
+            self.train = None
+            self.eval = None
 
-    def init_train(self):
-        trans_train = [
-            tvt2.ToImage(),
-            tvt2.RandomHorizontalFlip(p=0.2),
-            tvt2.RandomVerticalFlip(p=0.2),
-            RandomRotateChoice(angles=[0, 0, 0, 0, 90, 180]),
-            tvt2.RandomChoice(
-                [
-                    # ignore aspect ratio -- distorted square image
-                    tvt2.Resize(size=(self.args.size_resize, self.args.size_resize)),
-                    # keep aspect ratio
-                    tvt2.Resize(size=self.args.size_resize),
-                ],
-                p=[1 if self.args.data_crop != "center" else 0, 1],
-            ),
-            tvt2.RandomChoice(
-                [
-                    # square crop
-                    tvt2.RandomCrop(size=self.args.size_crop),
-                    tvt2.CenterCrop(size=self.args.size_crop),
-                ],
-                p=[2 if self.args.data_crop != "center" else 0, 1],
-            ),
-            tvt2.ToDtype(torch.float32, scale=True),
-        ]
+    def trans_train(self):
+        trans = []
 
-        if self.args.data_normalize:
-            trans_train.append(tvt2.Normalize(self.IMG_MEAN, self.IMG_STD))
+        if self.args.data_flip:
+            trans += [
+                trv2.RandomHorizontalFlip(p=0.2),
+                trv2.RandomVerticalFlip(p=0.2),
+                RandomRotateChoice(angles=[0, 0, 0, 0, 11, 23, -23, 180]),
+            ]
+
+        if self.args.data_crop == "random-resized":  # crop and resize
+            trans.append(
+                RandomResizedCropSq(
+                    size=self.args.size_crop,
+                    scale=(0.8, 1.0),
+                    ratio=(0.5, 2.2),
+                )
+            )
+        else:  # resize and crop
+            trans.append(
+                trv2.RandomChoice(
+                    [
+                        # ignore aspect ratio -- distorted square image
+                        trv2.Resize(size=(self.args.size_resize, self.args.size_resize)),
+                        # keep aspect ratio
+                        trv2.Resize(size=self.args.size_resize),
+                    ]
+                ),
+            )
+            if self.args.data_crop == "random":
+                trans.append(trv2.RandomCrop(size=self.args.size_crop))
+            else:
+                trans.append(trv2.CenterCrop(size=self.args.size_crop))
 
         if self.args.data_autocontrast:
-            trans_train.append(tvf.autocontrast)
+            trans.append(trf.autocontrast)
+
+        if self.args.data_normalize:
+            trans.append(trv2.Normalize(self.IMG_MEAN, self.IMG_STD))
 
         if self.args.data_equalize:
-            trans_train.append(tvf.equalize)
+            trans.append(trf.equalize)
 
-        self.train = trans_train
+        return trans
 
-    def init_eval(self):
-        trans_eval = [
-            tvt2.ToImage(),
-            tvt2.RandomChoice(
+    def trans_eval(self):
+        trans = [
+            trv2.RandomChoice(
                 [
                     # ignore aspect ratio -- distorted square image
-                    tvt2.Resize(size=(self.args.size_resize, self.args.size_resize)),
+                    trv2.Resize(size=(self.args.size_resize, self.args.size_resize)),
                     # keep aspect ratio
-                    tvt2.Resize(size=self.args.size_resize),
+                    trv2.Resize(size=self.args.size_resize),
                 ],
                 p=[1, 1],
             ),
-            tvt2.CenterCrop(size=self.args.size_crop),
-            tvt2.ToDtype(torch.float32, scale=True),
+            trv2.CenterCrop(size=self.args.size_crop),
         ]
-
         if self.args.data_normalize:
-            trans_eval.append(tvt2.Normalize(self.IMG_MEAN, self.IMG_STD))
-
+            trans.append(trv2.Normalize(self.IMG_MEAN, self.IMG_STD))
         if self.args.data_autocontrast:
-            trans_eval.append(tvf.autocontrast)
-
+            trans.append(trf.autocontrast)
         if self.args.data_equalize:
-            trans_eval.append(tvf.equalize)
-
-        self.eval = trans_eval
+            trans.append(trf.equalize)
+        return trans
 
 
 def main():
@@ -393,16 +398,16 @@ def main():
     """
 
     # read cli options
-    args = read_args()
-    setup_logging(args)
+    config = read_args()
+    setup_logging(config)
 
     log.info("the train is departing right now...")
-    for k, v in vars(args).items():
+    for k, v in config.items():
         log.info("%s=%s", k, v)
 
     # train
     tm_start = time.time()
-    model = Trainer(args, Data(Transforms(args), args))
+    model = Trainer(config, Data(Transforms(config), config))
     accuracy, path = model.train()
     tm_secs = int(time.time() - tm_start)
 
@@ -419,153 +424,195 @@ def read_args():
 
     ts = dt.now().strftime("%Y%m%d%H%M%S")
 
-    parser = argparse.ArgumentParser(
-        description="Train a model on a images dataset (single-label)",
-    )
+    parser = argparse.ArgumentParser(description="Train a model on a images dataset (multiple-labels classification)")
 
+    сparser = argparse.ArgumentParser(add_help=False)
+    сparser.add_argument("--config", default="settings.ini")
+    сparser.add_argument("--config-section", default="DEFAULT")
+    args, remaining_argv = сparser.parse_known_args()
+
+    config = configparser.ConfigParser()
+    config.read(args.config)
+
+    def cfg(key, default=None):
+        return config.get(args.config_section, key, fallback=default)
+
+    def cfg_bool(key, default=None) -> bool:
+        return str(cfg(key, default)).lower() in ["true", "yes", "on"]
+
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=cfg("name", "iklssfr"),
+    )
+    parser.add_argument(
+        "src",
+        type=str,
+        nargs="?",
+        default=cfg("src", "./data/"),
+    )
     parser.add_argument(
         "--model-path",
         type=str,
-        default="",
+        default=cfg("model-path"),
     )
     parser.add_argument(
         "--model-path-dir",
         type=str,
-        default="",
+        default=cfg("model-path-dir", ""),
     )
     parser.add_argument(
         "--save-all",
         action="store_true",
-        default=False,
+        default=cfg_bool("save-all", "False"),
     )
     parser.add_argument(
         "--model",
         "-m",
         type=str,
-        default="resnet18",
+        default=cfg("model", "resnet18"),
         help="resnet18|resnet50|…",
     )
     parser.add_argument(
         "--model-weights",
         type=str,
-        default="DEFAULT",
+        default=cfg("model-weights", "DEFAULT"),
         help="DEFAULT|IMAGENET1K_V2|…",
     )
     parser.add_argument(
         "--model-source",
         type=str,
-        default="github",
+        default=cfg("model-source", "github"),
         choices=["github", "file"],
     )
     parser.add_argument(
         "--model-keep-classes",
         action="store_true",
-        default=False,
+        default=cfg_bool("model-keep-classes", "False"),
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.001,
+        default=float(cfg("learning-rate", "0.001") or 0.001),
     )
     parser.add_argument(
         "--optimizer",
         type=str,
-        default="adamw",
+        default=cfg("optimizer", "adamw"),
         choices=["adam", "adamw", "sgd"],
+    )
+    parser.add_argument(
+        "--optimizer-step-every-n",
+        type=int,
+        default=int(cfg("optimizer-step-every-n", "3") or 3),
     )
     parser.add_argument(
         "--criterion",
         type=str,
-        default="bce",
-        choices=["bce", "ce"],
-    )
-    parser.add_argument(
-        "--data",
-        type=str,
-        default="data/",
+        default=cfg("criterion", "bce"),
+        choices=["bce"],
     )
     parser.add_argument(
         "--data-classes",
         type=str,
-        default="",
+        default=cfg("data-classes", ""),
+    )
+    parser.add_argument(
+        "--data-ready",
+        action="store_true",
+        default=cfg_bool("data-ready", "False"),
     )
     parser.add_argument(
         "--data-normalize",
         "-dn",
         action="store_true",
-        default=False,
+        default=cfg_bool("data-normalize", "True"),
     )
     parser.add_argument(
         "--data-equalize",
         "-dq",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=cfg_bool("data-equalize", "False"),
     )
     parser.add_argument(
         "--data-autocontrast",
         "-da",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=cfg_bool("data-autocontrast", "False"),
+    )
+    parser.add_argument(
+        "--data-flip",
+        "-df",
+        action=argparse.BooleanOptionalAction,
+        default=cfg_bool("data-flip", "True"),
     )
     parser.add_argument(
         "--data-crop",
         "-dc",
         type=str,
-        default="random",
-        choices=["random", "center"],
+        default=cfg("data-crop", "center"),
+        choices=["random", "random-resized", "center"],
     )
     parser.add_argument(
         "--data-reload",
         type=int,
-        default=DATA_RELOAD,
+        default=int(cfg("data-reload", DATA_RELOAD)),
     )
     parser.add_argument(
         "--data-train-pc",
         type=int,
-        default=DATA_TRAIN_PC,
+        default=int(cfg("data-train-pc", DATA_TRAIN_PC) or DATA_TRAIN_PC),
     )
     parser.add_argument(
         "--size-crop",
         type=int,
-        default=DATA_CROP,
+        default=int(cfg("size-crop", DATA_CROP) or DATA_CROP),
     )
     parser.add_argument(
         "--size-resize",
         type=int,
-        default=DATA_RESIZE,
+        default=int(cfg("size-resize", DATA_RESIZE) or DATA_RESIZE),
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=BATCH_SIZE,
+        default=int(cfg("batch-size", BATCH_SIZE) or BATCH_SIZE),
     )
     parser.add_argument(
         "--epochs-limit",
         type=int,
-        default=EPOCHS_LIMIT,
+        default=int(cfg("epochs-limit", EPOCHS_LIMIT) or EPOCHS_LIMIT),
     )
     parser.add_argument(
         "--device",
         type=str,
-        default=DEVICE,
+        default=cfg("device", str(DEVICE)) or DEVICE,
     )
     parser.add_argument(
         "--log",
         type=str,
-        default=f"k{ts}.log",
+        default=cfg("log"),
     )
     parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default=cfg("log-level", "INFO"),
+    )
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=cfg_bool("debug", "False"),
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=os.cpu_count() // 4,
+        default=int(cfg("workers", "0")) or ((os.cpu_count() or 4) // 4),
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(remaining_argv)
+
+    if args.src.startswith("file://"):
+        args.src = urllib.parse.unquote(args.src[7:])
 
     if args.size_resize and args.size_crop > args.size_resize:
         args.size_crop = args.size_resize
@@ -576,17 +623,32 @@ def read_args():
     if args.data_classes:
         args.data_classes = args.data_classes.split(",")
 
-    if not args.model_path:
+    if args.data_ready:
+        args.data_normalize = True
+        args.data_autocontrast = True
+
+    if args.model_path:
+        args.model_path = str(args.model_path).format(name=args.name, ts=ts, model=args.model)
+    else:
         if args.save_all:
-            args.model_path = f"k{ts}_{{epoch}}.pth"
+            args.model_path = f"{args.name}_{ts}_{{epoch}}.pth"
         else:
-            args.model_path = f"k{ts}.pth"
+            args.model_path = f"{args.name}_{ts}.pth"
+
+    if args.log is None:
+        args.log = f"{args.name}_{ts}.log"
+
+    if args.debug:
+        args.log_level = "DEBUG"
 
     if args.model_path_dir:
         args.model_path = os.path.join(args.model_path_dir, args.model_path)
         args.log = os.path.join(args.model_path_dir, args.log)
 
-    return args
+    config = Configuration(none_missing=True)
+    config.configure(params=vars(args))
+
+    return config
 
 
 if __name__ == "__main__":
