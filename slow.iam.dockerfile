@@ -2,7 +2,7 @@
 FROM python:3.13-slim
 
 ##
-RUN apt update && apt upgrade -y && apt install -y make curl unzip
+RUN apt update && apt upgrade -y && apt install -y make curl unzip gcc g++
 
 ##
 WORKDIR /slow.iam
@@ -28,14 +28,16 @@ RUN test -d /slow.iam/_torch/hub/checkpoints || \
     find /slow.iam/_torch/ -maxdepth 3 -type d -or -iname '*.pth'
 
 ##
-COPY  requirements*txt Makefile /slow.iam/
+COPY requirements*txt Makefile /slow.iam/
 RUN --mount=type=cache,mode=0755,id=pip-cache,target=/var/pip-cache \
     PIP_CACHE_DIR=/var/pip-cache \
     make install
 
 ##
-COPY  iklssfr /slow.iam/iklssfr
-COPY  toolz /slow.iam/toolz
+COPY iklssfr /slow.iam/iklssfr
+COPY ireqs /slow.iam/ireqs
+COPY ihelp /slow.iam/ihelp
+COPY toolz /slow.iam/toolz
 
 CMD ["make", "demo-no-show"]
 

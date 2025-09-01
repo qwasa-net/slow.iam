@@ -1,1 +1,2 @@
-Pillow-SIMD==9.5.0.post2
+Pillow-SIMD
+onnxruntime-gpu

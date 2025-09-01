@@ -18,7 +18,7 @@ SOURCE_DIRS ?= iklssfr ihelp toolz
 ##
 .PHONY: help tea install install-extra install-dev shell format lint
 .PHONY: docker-build-run docker-build-image docker-container-run
-.PHONY: demo demo-no-show run-demo demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
+.PHONY: demo demo-no-show demo-run demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
 
 
 help:
@@ -74,12 +74,12 @@ lint:  ## lint
 ## demo
 demo: DEMO_RUN_MODEL_OPTS ?= --show --show-original --limit 60 --summarize
 demo: DEMO_TRAIN_MODEL_OPTS ?= --model resnet18 --epochs-limit 17 --batch-size 8 --data-autocontrast --data-normalize --workers 1
-demo: run-demo  ## run demo
+demo: demo-run  ## run demo
 
 demo-no-show: DEMO_RUN_MODEL_OPTS = --no-show --limit 100 --summarize
-demo-no-show: run-demo  ## run demo without show
+demo-no-show: demo-run  ## run demo without show
 
-run-demo: demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
+demo-run: demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
 
 demo-generate-train-set:
 	# [1] generate train dataset
