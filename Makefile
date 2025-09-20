@@ -13,40 +13,47 @@ DOCKER_CONTAINER_NAME ?= slow-iam
 
 DATA_DIR ?= $(BASE_DIR)/data
 
-SOURCE_DIRS ?= iklssfr ihelp toolz
+SOURCE_DIRS ?= iklssfr ireqs ihelp toolz
 
 ##
 .PHONY: help tea install install-extra install-dev shell format lint
 .PHONY: docker-build-run docker-build-image docker-container-run
 .PHONY: demo demo-no-show demo-run demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
 
-
+## …
 help:
 	@egrep "(^|  )## " ${MAKEFILE} | sed 's/:.*##/ ##/' | sed 's/ ## / -- /'
-	@echo "> make demo"
+	@echo -n "\n> make tea\n"
 
 tea: install install-dev format lint demo  ## install and run demo
 
 ## env
-$(PYTHON):  ## create venv
+$(PYTHON):
 	[ -d $(VENV) ] || $(PYTHON_SYSTEM) -m venv "$(VENV)" --clear
 
 install: $(PYTHON)  ## install requirements
 	$(PIP) install --upgrade pip setuptools
 	$(PIP) install --requirement requirements.txt --log ${VENV}/pip.log
 
-install-extra: $(PYTHON)  ## install extra requirements
+install-extra: $(PYTHON)  ## try to install extra requirements
 	-$(PIP) install --requirement requirements-extra.txt --log ${VENV}/pip.log 2>&1
 
 install-dev: install  ## install dev tools
 	$(PIP) install --requirement requirements-dev.txt
 
+install-cpu: PIP_EXTRA_ARGS = --extra-index-url=https://download.pytorch.org/whl/cpu
+install-cpu: $(PYTHON)  ## install requirements (cpu-only)
+	$(PIP) install --upgrade pip setuptools
+	$(PIP) install $(PIP_EXTRA_ARGS) --requirement requirements-cpu.txt --log ${VENV}/pip.log
+
+install-docker: install-cpu  ## install requirements for docker build (cpu)
 
 ## docker
 docker-build-run: docker-build-image docker-container-run  ## build and run docker container
 
 docker-build-image:  ## build docker image
 	$(DOCKER) build -t $(DOCKER_IMAGE_NAME) -f slow.iam.dockerfile .
+	$(DOCKER) image ls -a $(DOCKER_IMAGE_NAME)
 
 docker-container-run:  ## run docker container
 	$(DOCKER) run \
@@ -54,11 +61,9 @@ docker-container-run:  ## run docker container
 	--name=$(DOCKER_CONTAINER_NAME) \
 	$(DOCKER_IMAGE_NAME)
 
-
-## shell
+## shell and tools
 $(IPYTHON):
 	test -f $(IPYTHON) || make install-dev
-
 
 shell: $(IPYTHON)  ## run ipython shell
 	$(IPYTHON) -c 'import re, math, json; import torch; print(f"{torch.version.__version__=}")' -i
@@ -74,10 +79,10 @@ lint:  ## lint
 ## demo
 demo: DEMO_RUN_MODEL_OPTS ?= --show --show-original --limit 60 --summarize
 demo: DEMO_TRAIN_MODEL_OPTS ?= --model resnet18 --epochs-limit 17 --batch-size 8 --data-autocontrast --data-normalize --workers 1
-demo: demo-run  ## run demo
+demo: demo-run  ## run demo (iklssfr)
 
 demo-no-show: DEMO_RUN_MODEL_OPTS = --no-show --limit 100 --summarize
-demo-no-show: demo-run  ## run demo without show
+demo-no-show: demo-run  ## run demo without show (iklssfr)
 
 demo-run: demo-generate-train-set demo-generate-test-set demo-train-model demo-run-model
 

@@ -1,0 +1,13 @@
+#
+torch==2.8.0+cpu
+torchvision==0.23.0+cpu
+
+#
+pillow
+
+#
+insightface
+onnxruntime
+open_clip_torch
+psycopg2-binary
+pgvector

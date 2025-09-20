@@ -116,5 +116,4 @@ class DB:
                 """,
                 (query_vector, limit),
             )
-            results = cursor.fetchall()
-        return results
+            return cursor.fetchall()
